@@ -11,3 +11,5 @@ pandas
 numpy
 scipy
 streamlit
+umap-learn
+hdbscan
