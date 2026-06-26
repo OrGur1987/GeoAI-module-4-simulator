@@ -1,0 +1,13 @@
+momepy
+networkx
+osmnx
+pyproj
+geopandas
+shapely
+scikit-learn
+seaborn
+matplotlib
+pandas
+numpy
+scipy
+streamlit
