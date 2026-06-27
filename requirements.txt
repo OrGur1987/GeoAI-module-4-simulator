@@ -13,3 +13,4 @@ scipy
 streamlit
 umap-learn
 hdbscan
+mesa

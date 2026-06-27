@@ -8,6 +8,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 import time
 import json
 from pathlib import Path
+import networkx as nx
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
@@ -17,8 +18,6 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
 
 _DATA        = Path(__file__).parent / "simulator_data"
 RAW_PATH     = _DATA / "Vienna.txt"
@@ -858,110 +857,299 @@ new BtnControl().addTo(map);
         })
     st.dataframe(pd.DataFrame(summary_rows), hide_index=True, width="stretch")
 
-# ════════════════════════════════════════════════════════════════════════════════
-# 5. KMeans comparison
-# ════════════════════════════════════════════════════════════════════════════════
-
-st.divider()
-st.header("5. KMeans comparison")
-st.markdown("""
-KMeans is kept here as a **baseline** to contrast with HDBSCAN. Key things
-to look for in the cross-tabulation below:
-
-- **Diagonal pattern** → both algorithms agree; those clusters are robust.
-- **Off-diagonal mass** → days where the algorithms disagree — often the most
-  analytically interesting boundary-case behaviour.
-- KMeans forces *every* day into a cluster (no noise class), so atypical days
-  inflate whichever centroid they happen to be nearest to.
-""")
-
-
-@st.cache_data(show_spinner="Running KMeans for K = 2..7...")
-def compute_elbow(X_hash, _X_scaled):
-    ks, inertias, silhouettes = [], [], []
-    for k in range(2, 8):
-        km     = KMeans(n_clusters=k, random_state=42, n_init=10)
-        labels = km.fit_predict(_X_scaled)
-        ks.append(k)
-        inertias.append(km.inertia_)
-        silhouettes.append(
-            silhouette_score(_X_scaled, labels,
-                             sample_size=min(5000, len(_X_scaled)),
-                             random_state=42)
-        )
-    return ks, inertias, silhouettes
-
-
-ks, inertias, silhouettes = compute_elbow(X_hash, X_scaled)
-
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 3.5))
-ax1.plot(ks, inertias,    "o-", color="#1E88E5")
-ax1.set_xlabel("K");  ax1.set_ylabel("Inertia")
-ax1.set_title("Elbow curve — look for the bend")
-ax1.xaxis.set_major_locator(mticker.MultipleLocator(1))
-
-ax2.plot(ks, silhouettes, "o-", color="#43A047")
-ax2.set_xlabel("K");  ax2.set_ylabel("Silhouette score (higher = better)")
-ax2.set_title("Silhouette score")
-ax2.xaxis.set_major_locator(mticker.MultipleLocator(1))
-plt.tight_layout()
-st.pyplot(fig)
-plt.close()
-
-st.info(
-    "**How to choose K:** find the elbow in the inertia curve (where improvement flattens), "
-    "confirmed by a silhouette peak. Silhouette > 0.10 is acceptable for geospatial data."
-)
-
-k_choice = st.slider("KMeans K", min_value=2, max_value=7, value=4, step=1, key="km_k")
-km_final = KMeans(n_clusters=k_choice, random_state=42, n_init=10)
-day_feats["cluster_kmeans"] = km_final.fit_predict(X_scaled)
-
-# ── Cross-tabulation heatmap ──────────────────────────────────────────────────
-
-if found_k > 0:
-    st.subheader("HDBSCAN vs KMeans — agreement heatmap")
-    st.markdown("""
-Each cell shows how many tourist-days were assigned to that **HDBSCAN cluster** *and*
-that **KMeans cluster**. A strong diagonal means both algorithms agree. High
-off-diagonal cells are the most interesting — days sitting ambiguously between groups.
-""")
-
-    cross = pd.crosstab(
-        day_feats["cluster"].map(
-            lambda x: "HDB Noise" if x == -1 else f"HDB {int(x) + 1}"
-        ),
-        day_feats["cluster_kmeans"].map(lambda x: f"KM {int(x) + 1}"),
-    )
-
-    n_hdb_rows = found_k + (1 if n_noise > 0 else 0)
-    fig, ax = plt.subplots(figsize=(max(5, k_choice * 1.3), max(4, n_hdb_rows * 0.9 + 1.5)))
-    im  = ax.imshow(cross.values, aspect="auto", cmap="YlOrRd")
-    ax.set_xticks(range(len(cross.columns)));  ax.set_xticklabels(cross.columns, fontsize=9)
-    ax.set_yticks(range(len(cross.index)));    ax.set_yticklabels(cross.index, fontsize=9)
-    ax.set_xlabel("KMeans cluster");           ax.set_ylabel("HDBSCAN cluster")
-    ax.set_title("Agreement heatmap — HDBSCAN × KMeans")
-    plt.colorbar(im, ax=ax, label="Tourist-days")
-    vmax = cross.values.max()
-    for i in range(len(cross.index)):
-        for j in range(len(cross.columns)):
-            val = cross.values[i, j]
-            if val > 0:
-                ax.text(j, i, str(val), ha="center", va="center", fontsize=8,
-                        color="white" if val > vmax * 0.5 else "black")
-    plt.tight_layout()
-    st.pyplot(fig)
-    plt.close()
-
 # ── Save ──────────────────────────────────────────────────────────────────────
 
 st.divider()
-if st.button("Save clustered CSV (adds 'cluster' and 'cluster_kmeans' columns)"):
+if st.button("Save clustered CSV (adds 'cluster' column)"):
     df_save = df.copy()
     df_save["date"] = df_save["datetime"].dt.date
     merged = df_save.merge(
-        day_feats[["user_id", "date", "cluster", "cluster_kmeans"]],
+        day_feats[["user_id", "date", "cluster"]],
         on=["user_id", "date"], how="left"
     )
     merged.drop(columns=["max_months_in_any_year"], errors="ignore").to_csv(CLUSTER_PATH, index=False)
     st.success(f"Saved {len(merged):,} rows to `{CLUSTER_PATH}`")
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 6. AGENT-BASED SIMULATION
+# ════════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.header("6. Agent-Based Simulation")
+st.markdown("""
+One agent per HDBSCAN cluster is spawned; each agent's movement rules come
+directly from its cluster's mean feature values:
+
+| Feature | Role in simulation |
+|---|---|
+| `pct_center_locations` | Biases home base toward Innere Stadt or outer districts |
+| `radius_of_gyration_km` | Maximum roaming distance from home base |
+| `median_step_km` | Target distance per visit step |
+| `path_linearity` | Probability of continuing in the same direction vs. turning to a new target |
+| `pct_tourism / food / local / leisure` | POI category sampling weights |
+
+Each **step** is one location visit. Between visits the agent is routed along
+Vienna's actual road network — no straight lines through buildings.
+""")
+
+try:
+    import mesa as _mesa
+    _MESA_OK = True
+except ImportError:
+    _MESA_OK = False
+    st.error("`mesa` not installed — run `pip install mesa` in your venv.")
+
+
+@st.cache_data(show_spinner="Downloading Vienna road network (one-time, ~30 s)...")
+def get_road_graph():
+    G = ox.graph_from_place("Vienna, Austria", network_type="drive", simplify=True)
+    print(f"  [{time.strftime('%H:%M:%S')}] [road graph] "
+          f"{len(G.nodes):,} nodes, {len(G.edges):,} edges")
+    return G
+
+
+def _route_waypoints(G, lat1, lon1, lat2, lon2):
+    """Return street-following waypoints between two lat/lon points."""
+    orig = ox.distance.nearest_nodes(G, lon1, lat1)
+    dest = ox.distance.nearest_nodes(G, lon2, lat2)
+    if orig == dest:
+        return [{"lat": lat1, "lon": lon1}]
+    try:
+        path = nx.shortest_path(G, orig, dest, weight="length")
+        return [{"lat": G.nodes[n]["y"], "lon": G.nodes[n]["x"]} for n in path]
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return [{"lat": lat1, "lon": lon1}, {"lat": lat2, "lon": lon2}]
+
+
+if _MESA_OK and found_k > 0:
+
+    # ── Archetype parameters ──────────────────────────────────────────────────
+    cluster_archetypes = []
+    for c in unique_clusters:
+        mask  = day_feats["cluster"] == c
+        means = day_feats.loc[mask, FEATURE_COLS].mean()
+        w     = [float(means.get(f"pct_{cat}", 0.25))
+                 for cat in ["tourism", "food", "local", "leisure"]]
+        total = sum(w) or 1.0
+        cluster_archetypes.append({
+            "cluster":     c,
+            "label":       f"Cluster {c + 1}",
+            "color":       CLUSTER_COLORS[unique_clusters.index(c) % len(CLUSTER_COLORS)],
+            "radius_km":   max(0.5,  float(means.get("radius_of_gyration_km", 2.0))),
+            "step_km":     max(0.05, float(means.get("median_step_km", 0.5))),
+            "linearity":   float(means.get("path_linearity", 0.5)),
+            "pct_center":  float(means.get("pct_center_locations", 0.5)),
+            "poi_weights": [wi / total for wi in w],
+        })
+
+    st.caption("Archetype parameters derived from cluster mean feature values:")
+    st.dataframe(pd.DataFrame([{
+        "Cluster":     a["label"],
+        "Radius (km)": f"{a['radius_km']:.2f}",
+        "Step (km)":   f"{a['step_km']:.3f}",
+        "Linearity":   f"{a['linearity']:.2f}",
+        "% Centre":    f"{a['pct_center']*100:.0f}%",
+        "Tourism":     f"{a['poi_weights'][0]*100:.0f}%",
+        "Food":        f"{a['poi_weights'][1]*100:.0f}%",
+        "Local":       f"{a['poi_weights'][2]*100:.0f}%",
+        "Leisure":     f"{a['poi_weights'][3]*100:.0f}%",
+    } for a in cluster_archetypes]), hide_index=True, width="stretch")
+
+    n_steps = st.slider(
+        "Steps per agent (location visits)", min_value=5, max_value=50, value=20, key="sim_steps"
+    )
+
+    if st.button("▶  Run simulation", key="run_sim"):
+
+        poi_by_cat = {
+            cat: list(zip(pois[pois["poi_category"] == cat].geometry.y,
+                          pois[pois["poi_category"] == cat].geometry.x))
+            for cat in ["tourism", "food", "local", "leisure"]
+        }
+
+        # ── Mesa agent ────────────────────────────────────────────────────────
+        class TouristAgent(_mesa.Agent):
+            def __init__(self, model, archetype, uid):
+                super().__init__(model)
+                self.arch = archetype
+                rng   = np.random.default_rng(uid)
+                r_max = max(0.3, (1.0 - archetype["pct_center"]) * 10.0)
+                r     = rng.uniform(0.0, r_max)
+                theta = rng.uniform(0.0, 2 * np.pi)
+                self.lat = float(np.clip(
+                    INNERE_STADT[0] + r * np.cos(theta) / 111.0, 48.12, 48.32))
+                self.lon = float(np.clip(
+                    INNERE_STADT[1] + r * np.sin(theta) / (111.0 * np.cos(np.radians(INNERE_STADT[0]))),
+                    16.18, 16.58))
+                self.home_lat = self.lat
+                self.home_lon = self.lon
+                self.heading  = float(theta)
+                self._rng     = rng
+                # visit_positions stores raw behavioral waypoints (one per step)
+                self.visit_positions = [{"lat": self.lat, "lon": self.lon}]
+
+            def _pick_target(self):
+                cats = ["tourism", "food", "local", "leisure"]
+                w    = np.array(self.arch["poi_weights"], dtype=float)
+                s    = w.sum()
+                w    = w / s if s > 0 else np.ones(len(cats)) / len(cats)
+                idx  = self._rng.choice(len(cats), p=w)
+                pool = poi_by_cat[cats[idx]]
+                if not pool:
+                    return None
+                radius   = self.arch["radius_km"] * 1.5
+                in_range = [(la, lo) for la, lo in pool
+                            if float(_haversine_km(la, lo, self.home_lat, self.home_lon)) <= radius]
+                pool = in_range if in_range else pool
+                return pool[int(self._rng.integers(0, len(pool)))]
+
+            def step(self):
+                target = self._pick_target()
+                if target is None:
+                    self.visit_positions.append({"lat": self.lat, "lon": self.lon})
+                    return
+                t_lat, t_lon = target
+                dist = float(_haversine_km(self.lat, self.lon, t_lat, t_lon))
+                if dist < 0.05:
+                    self.heading = float(self._rng.uniform(0, 2 * np.pi))
+                    self.visit_positions.append({"lat": self.lat, "lon": self.lon})
+                    return
+                step_km = self.arch["step_km"]
+                if self._rng.random() < self.arch["linearity"]:
+                    new_lat = self.lat + step_km * np.cos(self.heading) / 111.0
+                    new_lon = self.lon + step_km * np.sin(self.heading) / (111.0 * np.cos(np.radians(self.lat)))
+                else:
+                    frac    = min(1.0, step_km / dist)
+                    new_lat = self.lat + frac * (t_lat - self.lat)
+                    new_lon = self.lon + frac * (t_lon - self.lon)
+                    self.heading = float(np.arctan2(t_lon - self.lon, t_lat - self.lat))
+                self.lat = float(np.clip(new_lat, 48.12, 48.32))
+                self.lon = float(np.clip(new_lon, 16.18, 16.58))
+                self.visit_positions.append({"lat": self.lat, "lon": self.lon})
+
+        class ViennaModel(_mesa.Model):
+            def __init__(self, archetypes):
+                super().__init__()
+                self.all_agents = [
+                    TouristAgent(self, arch, uid)
+                    for uid, arch in enumerate(archetypes)
+                ]
+            def step(self):
+                for agent in self.all_agents:
+                    agent.step()
+
+        # ── Run behavioural simulation ─────────────────────────────────────
+        with st.spinner(f"Simulating {len(cluster_archetypes)} agents × {n_steps} steps…"):
+            model = ViennaModel(cluster_archetypes)
+            for _ in range(n_steps):
+                model.step()
+
+        # ── Route each segment along the road network ──────────────────────
+        G = get_road_graph()
+        agents_data = []
+        with st.spinner("Routing agents along Vienna's road network…"):
+            for i, ag in enumerate(model.all_agents):
+                visits = ag.visit_positions
+                full_traj = []
+                for j in range(len(visits) - 1):
+                    p1, p2 = visits[j], visits[j + 1]
+                    segment = _route_waypoints(G, p1["lat"], p1["lon"],
+                                                  p2["lat"], p2["lon"])
+                    full_traj.extend(segment[:-1])
+                full_traj.append(visits[-1])
+                agents_data.append({
+                    "id":         i,
+                    "cluster":    ag.arch["label"],
+                    "color":      ag.arch["color"],
+                    "trajectory": full_traj,
+                    "n_waypoints": len(full_traj),
+                })
+
+        total_wp = sum(a["n_waypoints"] for a in agents_data)
+
+        # ── Animated Leaflet map ───────────────────────────────────────────
+        st.subheader("Simulation replay")
+        st.caption(
+            f"{len(agents_data)} agents · {n_steps} visit steps · "
+            f"{total_wp:,} road waypoints total. "
+            "Animation steps through each road waypoint."
+        )
+
+        max_wp = max(a["n_waypoints"] for a in agents_data)
+
+        sim_html = (
+            """
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  #sim-ctrl { display:flex; gap:8px; align-items:center; padding:6px 0;
+              font-family:sans-serif; font-size:13px; }
+  #sim-ctrl button { padding:4px 14px; cursor:pointer; border:1px solid #aaa;
+                     border-radius:4px; background:#f4f4f4; font-size:12px; }
+  #step-lbl { color:#555; margin-left:4px; }
+</style>
+<div id="sim-ctrl">
+  <button id="btn-play">&#9654; Play</button>
+  <button id="btn-pause">&#9646;&#9646; Pause</button>
+  <button id="btn-reset">&#8635; Reset</button>
+  <span id="step-lbl">0 / """
+            + str(max_wp - 1)
+            + """</span>
+</div>
+<div id="simmap" style="height:520px; border-radius:6px;"></div>
+<script>
+const AGENTS  = """ + json.dumps(agents_data) + """;
+const MAX_WP  = """ + str(max_wp) + """;
+const TRAIL   = 40;
+
+var map = L.map('simmap').setView([48.205, 16.37], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    {attribution:'© OpenStreetMap contributors', maxZoom:19}).addTo(map);
+
+var markers = {}, trails = {};
+AGENTS.forEach(function(a) {
+    var p0 = a.trajectory[0];
+    markers[a.id] = L.circleMarker([p0.lat, p0.lon], {
+        radius:7, color:a.color, fillColor:a.color, fillOpacity:0.9, weight:1.5
+    }).bindTooltip(a.cluster, {permanent:true, direction:'top', offset:[0,-8]}).addTo(map);
+    trails[a.id] = L.polyline([[p0.lat, p0.lon]],
+        {color:a.color, weight:2.5, opacity:0.6}).addTo(map);
+});
+
+var curStep = 0, timer = null, playing = false;
+
+function render(step) {
+    curStep = Math.max(0, Math.min(MAX_WP - 1, step));
+    AGENTS.forEach(function(a) {
+        var idx = Math.min(curStep, a.trajectory.length - 1);
+        var pos = a.trajectory[idx];
+        markers[a.id].setLatLng([pos.lat, pos.lon]);
+        var from = Math.max(0, idx - TRAIL);
+        var seg  = a.trajectory.slice(from, idx + 1).map(function(p){return [p.lat, p.lon];});
+        trails[a.id].setLatLngs(seg);
+    });
+    document.getElementById('step-lbl').textContent = curStep + ' / ' + (MAX_WP - 1);
+}
+
+function play() {
+    if (playing) return;
+    playing = true;
+    timer = setInterval(function() {
+        if (curStep >= MAX_WP - 1) { pause(); return; }
+        render(curStep + 1);
+    }, 80);
+}
+function pause() {
+    playing = false;
+    if (timer) { clearInterval(timer); timer = null; }
+}
+document.getElementById('btn-play').onclick  = play;
+document.getElementById('btn-pause').onclick = pause;
+document.getElementById('btn-reset').onclick = function(){ pause(); render(0); };
+</script>
+"""
+        )
+        st.iframe(sim_html, height=620)
+
+elif found_k == 0:
+    st.info("Run clustering in section 4 first to define behavioural archetypes.")
