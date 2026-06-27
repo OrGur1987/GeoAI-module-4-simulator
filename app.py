@@ -27,34 +27,38 @@ CLUSTER_PATH = _DATA / "Vienna_clustered.csv"
 INNERE_STADT = (48.2093, 16.3728)
 
 FEATURE_COLS = [
-    "n_visits", "time_span_hours",
+    "n_locations", "time_span_hours",
     "radius_of_gyration_km", "path_linearity", "median_step_km",
-    "location_entropy", "pct_center_visits",
-    "morning_ratio", "noon_ratio", "evening_ratio", "night_ratio", "is_weekend",
+    "location_entropy", "pct_center_locations",
     "pct_tourism", "pct_food", "pct_local", "pct_leisure",
 ]
 
 FEAT_LABELS = {
-    "n_visits":              ("many visit events",                "few visit events"),
+    "n_locations":              ("many visit events",                "few visit events"),
     "time_span_hours":       ("long day (many hours active)",     "short day (few hours)"),
     "radius_of_gyration_km": ("wide spatial spread",              "narrow spread"),
     "path_linearity":        ("linear A→B route",                "circular / area loop"),
     "median_step_km":        ("large landmark-to-landmark jumps", "slow local drift"),
     "location_entropy":      ("spread across many spots",         "concentrated at few spots"),
-    "pct_center_visits":     ("city-centre focused",              "exploring outer districts"),
-    "morning_ratio":         ("morning-active (06–12)",           "avoids mornings"),
-    "noon_ratio":            ("midday-active (12–18)",            "avoids midday"),
-    "evening_ratio":         ("evening-active (18–24)",           "avoids evenings"),
-    "night_ratio":           ("night-active (00–06)",             "avoids nights"),
-    "is_weekend":            ("weekend day",                      "weekday"),
+    "pct_center_locations":     ("city-centre focused",              "exploring outer districts"),
     "pct_tourism":           ("near tourist POIs",                "avoids tourist spots"),
     "pct_food":              ("food & drink oriented",            "avoids food venues"),
     "pct_local":             ("local services area",              "avoids local services"),
     "pct_leisure":           ("leisure & parks",                  "avoids leisure areas"),
 }
 
-CLUSTER_COLORS = ["#E53935", "#1E88E5", "#43A047", "#FB8C00",
-                  "#8E24AA", "#00ACC1", "#F4511E"]
+CLUSTER_COLORS = [
+    "#E6194B",  # red
+    "#4363D8",  # blue
+    "#3CB44B",  # green
+    "#F58231",  # orange
+    "#911EB4",  # purple
+    "#42D4F4",  # cyan
+    "#F032E6",  # magenta
+    "#FFE119",  # yellow
+    "#469990",  # teal
+    "#DCBEFF",  # lavender
+]
 
 
 def _haversine_km(lat1, lon1, lat2, lon2):
@@ -269,11 +273,11 @@ def get_pois():
             gdf = gdf.to_crs("EPSG:4326")
             gdf["poi_category"] = cat
             parts.append(gdf[["geometry", "poi_category"]])
-            print(f"  [POI] {cat}: {len(gdf):,} features in {time.time() - t0:.1f}s")
+            print(f"  [{time.strftime('%H:%M:%S')}] [POI] {cat}: {len(gdf):,} features in {time.time() - t0:.1f}s")
         except Exception as e:
-            print(f"  [POI] {cat}: FAILED ({e})")
+            print(f"  [{time.strftime('%H:%M:%S')}] [POI] {cat}: FAILED ({e})")
     pois = pd.concat(parts, ignore_index=True)
-    print(f"  [POI] total: {len(pois):,} POIs across {len(parts)} categories")
+    print(f"  [{time.strftime('%H:%M:%S')}] [POI] total: {len(pois):,} POIs across {len(parts)} categories")
     return gpd.GeoDataFrame(pois, geometry="geometry", crs="EPSG:4326")
 
 
@@ -295,7 +299,7 @@ def compute_poi_distances(_df, _pois):
         distance_col="nearest_poi_dist_m"
     )
     result = result.drop_duplicates(subset=["photo_id"])
-    print(f"  [POI distances] {len(result):,} visits matched in {time.time() - t0:.1f}s")
+    print(f"  [{time.strftime('%H:%M:%S')}] [POI distances] {len(result):,} visits matched in {time.time() - t0:.1f}s")
     return result[["photo_id", "nearest_poi_dist_m", "poi_category"]].reset_index(drop=True)
 
 
@@ -375,9 +379,8 @@ Features are drawn from three groups, all standardised (z-score) before clusteri
 
 | Group | Features |
 |---|---|
-| **Mobility** | visit events · active hours · radius of gyration · path linearity · median step distance · location entropy · % centre visits |
-| **Temporal** | morning / noon / evening / night ratios · weekend flag |
-| **POI affinity** | % of visits near each POI category |
+| **Mobility** | locations visited · active hours · radius of gyration · path linearity · median step distance · location entropy · % centre locations |
+| **POI affinity** | % of locations near each POI category |
 
 POI features use the **{poi_radius} m radius** selected above.
 Tourist-days with fewer than 3 visits are excluded (too sparse to characterise movement).
@@ -401,17 +404,15 @@ def compute_day_features(_df, _poi_dist, poi_radius):
         df["nearest_poi_dist_m"] <= poi_radius
     )
     df["date"]  = df["datetime"].dt.date
-    df["hour"]  = df["datetime"].dt.hour
     df["lat_r"] = df["lat"].round(3)
     df["lon_r"] = df["long"].round(3)
 
     records = []
     for (uid, date), grp in df.groupby(["user_id", "date"]):
         grp  = grp.sort_values("datetime")
-        lats  = grp["lat"].values
-        lons  = grp["long"].values
-        hours = grp["hour"].values
-        n     = len(grp)
+        lats = grp["lat"].values
+        lons = grp["long"].values
+        n    = len(grp)
 
         lat_c = float(lats.mean())
         lon_c = float(lons.mean())
@@ -460,18 +461,13 @@ def compute_day_features(_df, _poi_dist, poi_radius):
             "date":                  date,
             "centroid_lat":          lat_c,
             "centroid_lon":          lon_c,
-            "n_visits":              n,
+            "n_locations":              n,
             "time_span_hours":       time_span,
             "radius_of_gyration_km": rog,
             "path_linearity":        path_lin,
             "median_step_km":        median_step,
             "location_entropy":      loc_entropy,
-            "pct_center_visits":     pct_center,
-            "morning_ratio":         float(((hours >= 6)  & (hours < 12)).mean()),
-            "noon_ratio":            float(((hours >= 12) & (hours < 18)).mean()),
-            "evening_ratio":         float(  (hours >= 18)               .mean()),
-            "night_ratio":           float(  (hours <  6)                .mean()),
-            "is_weekend":            float(grp["datetime"].iloc[0].weekday() >= 5),
+            "pct_center_locations":     pct_center,
             "pct_tourism":           pct("tourism"),
             "pct_food":              pct("food"),
             "pct_local":             pct("local"),
@@ -479,7 +475,7 @@ def compute_day_features(_df, _poi_dist, poi_radius):
         })
 
     elapsed = time.time() - t0
-    print(f"  [compute_day_features] {len(records):,} tourist-days in {elapsed:.1f}s")
+    print(f"  [{time.strftime('%H:%M:%S')}] [compute_day_features] {len(records):,} tourist-days in {elapsed:.1f}s")
     return pd.DataFrame(records)
 
 
@@ -491,14 +487,14 @@ day_feats = day_feats.merge(is_tourist_map, on="user_id", how="left")
 
 n_excluded_days = int((~day_feats["is_tourist"]).sum())
 day_feats = day_feats[day_feats["is_tourist"]].copy().reset_index(drop=True)
-day_feats = day_feats[day_feats["n_visits"] >= 3].copy().reset_index(drop=True)
+day_feats = day_feats[day_feats["n_locations"] >= 3].copy().reset_index(drop=True)
 st.caption(
     f"Clustering {len(day_feats):,} tourist-days from "
     f"{day_feats['user_id'].nunique():,} tourists "
     f"({n_excluded_days:,} local days excluded). Days with < 3 visits removed."
 )
 
-WINSOR_COLS = ["n_visits", "time_span_hours"]
+WINSOR_COLS = ["n_locations", "time_span_hours"]
 X = day_feats[FEATURE_COLS].fillna(0).copy()
 for col in WINSOR_COLS:
     cap = X[col].quantile(0.99)
@@ -507,12 +503,12 @@ for col in WINSOR_COLS:
 scaler   = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-p99_visits = day_feats["n_visits"].quantile(0.99)
+p99_visits = day_feats["n_locations"].quantile(0.99)
 p99_span   = day_feats["time_span_hours"].quantile(0.99)
-n_capped   = int((day_feats["n_visits"] > p99_visits).sum())
+n_capped   = int((day_feats["n_locations"] > p99_visits).sum())
 st.caption(
     f"Feature matrix: {X_scaled.shape[0]:,} tourist-days × {X_scaled.shape[1]} features. "
-    f"`n_visits` and `time_span_hours` winsorised at 99th percentile "
+    f"`n_locations` and `time_span_hours` winsorised at 99th percentile "
     f"({p99_visits:.0f} visits, {p99_span:.1f} h) — "
     f"{n_capped} extreme days remain but no longer dominate a cluster."
 )
@@ -523,14 +519,14 @@ X_hash = (poi_radius, X_scaled.shape, round(float(X_scaled.sum()), 2))
 
 st.subheader("Clustering approach — UMAP → HDBSCAN")
 st.markdown("""
-**Why not cluster directly on the 16 features?**
+**Why not cluster directly on the 11 features?**
 
 In high-dimensional spaces Euclidean distance loses meaning — a phenomenon
 called the *curse of dimensionality*. As the number of features grows, every
 pair of points looks roughly equally far apart, undermining any distance-based
 algorithm including KMeans and DBSCAN.
 
-**Step 1 — UMAP** compresses the 16 standardised features into 3 dimensions
+**Step 1 — UMAP** compresses the 11 standardised features into 3 dimensions
 while preserving *local structure*: days that behave similarly stay close
 together in the embedding. The 2-D version below is used for visualisation only.
 
@@ -548,67 +544,49 @@ genuinely atypical days worth inspecting. KMeans is kept at the bottom as a
 comparison baseline.
 """)
 
-st.markdown("**UMAP parameters** — these shape the embedding before HDBSCAN runs.")
-col_u1, col_u2 = st.columns(2)
-umap_neighbors = col_u1.slider(
+col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
+umap_neighbors = col_ctrl1.slider(
     "n_neighbors — local (low) vs global (high) structure",
-    min_value=5, max_value=100, value=30, step=5, key="umap_neighbors",
-    help="Higher values pull more global structure into the embedding. "
-         "Lower values preserve fine local detail.",
+    min_value=5, max_value=100, value=25, step=5, key="umap_neighbors",
+    help="Raise this if most days collapse into one large cluster — "
+         "it widens UMAP's view and separates broad behavioural groups.",
 )
-umap_min_dist = col_u2.slider(
-    "min_dist — how tightly points cluster in the embedding",
-    min_value=0.0, max_value=0.5, value=0.0, step=0.05, key="umap_min_dist",
-    help="0.0 = pack as tightly as possible (sharper boundaries). "
-         "Higher = spread out, smoothing the structure.",
+min_cs = col_ctrl2.slider(
+    "min_cluster_size — smallest group that counts as a cluster",
+    min_value=50, max_value=500, value=150, step=50, key="hdb_min_cs",
+)
+epsilon = col_ctrl3.slider(
+    "epsilon — merge clusters closer than ε",
+    min_value=0.0, max_value=2.0, value=0.7, step=0.1, key="hdb_epsilon",
+    help="Raise to reduce cluster count by merging nearby groups.",
 )
 
 
 @st.cache_data(show_spinner="Running UMAP dimensionality reduction...")
-def compute_umap(X_hash, _X_scaled, n_neighbors, min_dist):
+def compute_umap(X_hash, _X_scaled, n_neighbors):
     import umap as umap_lib
     reducer = umap_lib.UMAP(
         n_components=3, random_state=42, n_jobs=1,
-        n_neighbors=n_neighbors, min_dist=min_dist,
+        n_neighbors=n_neighbors, min_dist=0.0,
     )
     return reducer.fit_transform(_X_scaled)
 
 
-embedding = compute_umap(X_hash, X_scaled, umap_neighbors, umap_min_dist)
-
-col_hdb1, col_hdb2, col_hdb3 = st.columns([2, 2, 1])
-min_cs = col_hdb1.slider(
-    "min_cluster_size — smallest group that counts as a cluster",
-    min_value=5, max_value=100, value=20, step=5, key="hdb_min_cs",
-)
-epsilon = col_hdb2.slider(
-    "cluster_selection_epsilon — merge clusters closer than ε (raise to reduce count)",
-    min_value=0.0, max_value=2.0, value=0.5, step=0.1, key="hdb_epsilon",
-)
-sel_method = col_hdb3.radio(
-    "selection method",
-    options=["leaf", "eom"],
-    index=0,
-    key="hdb_method",
-    help=(
-        "**leaf** — fine-grained splits; use ε to merge back up.  \n"
-        "**eom** — keeps only the most stable clusters; tends to produce one large group."
-    ),
-)
+embedding = compute_umap(X_hash, X_scaled, umap_neighbors)
 
 
 @st.cache_data(show_spinner="Running HDBSCAN...")
-def compute_hdbscan(X_hash, _embedding, min_cluster_size, epsilon, cluster_selection_method):
+def compute_hdbscan(X_hash, _embedding, min_cluster_size, epsilon):
     import hdbscan as hdb_lib
     clusterer = hdb_lib.HDBSCAN(
         min_cluster_size=min_cluster_size,
         cluster_selection_epsilon=epsilon,
-        cluster_selection_method=cluster_selection_method,
+        cluster_selection_method="leaf",
     )
     return clusterer.fit_predict(_embedding).tolist()
 
 
-hdb_labels           = np.array(compute_hdbscan(X_hash, embedding, min_cs, epsilon, sel_method))
+hdb_labels           = np.array(compute_hdbscan(X_hash, embedding, min_cs, epsilon))
 day_feats["cluster"] = hdb_labels
 
 label_s         = pd.Series(hdb_labels)
@@ -860,7 +838,7 @@ new BtnControl().addTo(map);
             "Tourist-days":      int(mask.sum()),
             "Distinct tourists": int(grp["user_id"].nunique()),
             "% of days":         f"{mask.sum() / len(day_feats) * 100:.1f}%",
-            "Avg visits":        f"{grp['n_visits'].mean():.1f}",
+            "Avg visits":        f"{grp['n_locations'].mean():.1f}",
             "Avg span (h)":      f"{grp['time_span_hours'].mean():.1f}",
             "Avg radius (km)":   f"{grp['radius_of_gyration_km'].mean():.2f}",
             "Avg linearity":     f"{grp['path_linearity'].mean():.2f}",
@@ -873,7 +851,7 @@ new BtnControl().addTo(map);
             "Tourist-days":      int(mask.sum()),
             "Distinct tourists": int(grp["user_id"].nunique()),
             "% of days":         f"{mask.sum() / len(day_feats) * 100:.1f}%",
-            "Avg visits":        f"{grp['n_visits'].mean():.1f}",
+            "Avg visits":        f"{grp['n_locations'].mean():.1f}",
             "Avg span (h)":      f"{grp['time_span_hours'].mean():.1f}",
             "Avg radius (km)":   f"{grp['radius_of_gyration_km'].mean():.2f}",
             "Avg linearity":     f"{grp['path_linearity'].mean():.2f}",
